@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
+from unidecode import unidecode
 
 import numpy as np
 import pandas as pd
@@ -13,14 +14,13 @@ char_idx = {
     char : idx
     for idx, char in enumerate(alphabets)
 }
-freqs = (
+
+e_ioc = 0.067
+e_freqs = (
     pd.read_csv("./letter_freq.txt")
-    .sort_values("frequency", ascending=False)
+    .set_index("letter")["frequency"]
+    .to_dict()
 )
-e_freqs = {
-    letter : freq
-    for letter, freq in zip(freqs['letter'], freqs['frequency'])
-}
 
 
 def write_file(fname, text):
@@ -28,8 +28,14 @@ def write_file(fname, text):
         fout.write(text)
 
 
+def read_file(fname):
+    with open(fname, "r") as fin:
+        content = fin.read()
+    return content
+
+
 def normalize_text(text):
-    return (''.join([char for char in text if char.isalpha()])).upper()
+    return (''.join([char for char in unidecode(text) if char.isalpha()])).upper()
 
 
 def pad_key(text, key):
@@ -42,28 +48,40 @@ def pad_key(text, key):
 
 def encrypt_decrypt(mode, input, key):
     if mode == "encrypt":
-        m = 1
-        fout = f"ciphertext-{key}"
+        sign = 1
     else:
-        m = -1
-        fout = f"recovered-{key}"
+        sign = -1
 
     padded_key = pad_key(input, key)
+
     output = ""
     for input_char, key_char in zip(input, padded_key):
-        input_idx = char_idx[input_char]
-        key_idx = char_idx[key_char]
-        output_char = alphabets[(input_idx + (m * key_idx)) % 26]
+        input_idx, key_idx = char_idx[input_char], char_idx[key_char]
+        output_char = alphabets[(input_idx + (sign * key_idx)) % 26]
         output += output_char
-
-    write_file(fout, output)
 
     return output
 
 
+def build_matrix(text, klen):
+    """
+    Fit text into a matrix whose width is key length. 
+    Empty slots are filled with NULL which are
+    """
+    n = len(text)
+    padded_text = list(text)
+    padding_len = int((np.ceil(n / klen) * klen) - n)
+    if padding_len != 0:
+        padded_text.extend([None] * padding_len)
+
+    matrix = np.reshape(padded_text, shape=(-1, klen))
+
+    return matrix
+
+
 def ioc(column):
     """
-    Calculate index of coincidence for one matrix column. 
+    Calculate index of coincidence for the given matrix column. 
     """
     counts = {char : 0 for char in alphabets}
     for char in column:
@@ -81,66 +99,45 @@ def ioc(column):
     return ioc
 
 
-def friedman(cipher):
+def guess_key_length(cipher, alpha=0.7):
     """
-    Give each possible key length (1-32) a score of likelihood.
-    Return best guess (a integer). 
+    For each possible key length (1-32), build a cipher matrix;
+    Since every letter in the same column are shifted by the same letter in key,
+    its letter IOC should be close to the a real English IOC (0.067).
     """
-    clen = len(cipher)
-    
-    klen_score = defaultdict(int)
-    for klen in range(1, min(32, clen//2)+1):
+    klen_ioc_diff = defaultdict(float)
+    for klen in range(1, min(32, len(cipher)//2)+1):
         curr_score = 0.0
         matrix = build_matrix(cipher, klen)
-        for i in range(klen):
-            curr_score += ioc(matrix[:,i])
-        klen_score[klen] = curr_score / klen
-    
-    sorted_klen_score = sorted(
-        klen_score.items(),
-        key=lambda x:x[1],reverse=True
-    )
-    
-    return sorted_klen_score[0][0]
+        curr_score = sum( ioc(matrix[:,i]) for i in range(klen) )
+        avg_ioc = curr_score / klen
+        klen_ioc_diff[klen] = abs(avg_ioc - e_ioc)
 
+    top_klen_ioc_diff = {
+        klen : ioc_diff
+        for klen, ioc_diff in sorted(klen_ioc_diff.items(), key=lambda x: x[1])[:5]
+    }
 
-def kasiski(cipher):
-    size = 3
-    clen = len(cipher)
-    chunk_to_idxs = defaultdict(list)
-    for i in range(0, clen - size + 1):
-        chunk = cipher[i:i+size]
-        chunk_to_idxs[chunk].append(i)
+    ranked_klen = top_klen_ioc_diff.keys()
+    best_score, best_klen = float('-inf'), list(ranked_klen)[0]
+    max_diff = max(klen_ioc_diff.values())
 
-    intervals = []
-    for chunk, idxs in chunk_to_idxs.items():
-        occurrence = len(idxs)
-        if occurrence == 1: continue
-        for i in range(occurrence):
-            for j in range(i+1, occurrence):
-                intervals.append(idxs[j] - idxs[i])
-    
-    klen_to_score = defaultdict(int)
-    for interval in intervals:
-        for klen in range(2, min(32, clen//2)+1):
-            if interval % klen == 0:
-                klen_to_score[klen] += 1
-    
-    sorted_klen_to_score = sorted(
-        klen_to_score.items(),
-        key=lambda x:x[1], reverse=True
-    )
+    for klen, ioc_diff in top_klen_ioc_diff.items():
+        # ioc score
+        ico_score = 1 - (ioc_diff / max_diff)
 
-    return sorted_klen_to_score[0][0]
+        # length score (better when more candidates are its multiples)
+        rest = ranked_klen - {klen}
+        dividing_count = sum((1 - 1/r) for r in rest if r % klen == 0)
+        divisor_score = dividing_count / len(rest)
 
+        # combined score
+        final_score = alpha * ico_score + (1 - alpha) * divisor_score
 
-def guess_key_length(cipher):
-    """
-    Use Friedman's statistical method to estimate key length. 
-    """
-    friedman_guess = friedman(cipher)
-    # kasiski_guess = kasiski(cipher)
-    return friedman_guess
+        if final_score > best_score:
+            best_score, best_klen = final_score, klen
+
+    return best_klen
 
 
 def chi_squared(counts, e_counts):
@@ -159,36 +156,23 @@ def chi_squared(counts, e_counts):
     return sum(terms)
 
 
-def print_candidate_keys(ordered_guessed_per_column, top_n):
+def deduplicate_key(key):
     """
-    Print top most likely keys. 
-    Return nothing. 
+    If the key has repetition of smaller unit within, 
+    truncate the redundant part and report modified key.  
     """
-    for i in range(top_n):
-        key = ""
-        for col in ordered_guessed_per_column:
-            key += col[i]
-        print(key)
+    klen = len(key)
+    if klen <= 3: return key
+
+    for i in range(1, klen):
+        rotated_key = key[i:] + key[:i]
+        if rotated_key == key: 
+            return key[:i]
+        
+    return key
 
 
-def build_matrix(text, klen):
-    """
-    Fit text into a matrix whose width is key length.
-    Empty slots are filled with 'None'.
-    Return matrix. 
-    """
-    n = len(text)
-    padded_text = list(text)
-    padding_len = int((np.ceil(n / klen) * klen) - n)
-    if padding_len != 0:
-        padded_text.extend([None] * padding_len)
-
-    matrix = np.reshape(padded_text, shape=(-1, klen))
-
-    return matrix
-
-
-def kerckhoff(column):
+def guess_shifts(column):
     """
     Column-shift scoring function.
     Use Chi Squared method to test how similar the guess-shift-distribution is
@@ -196,18 +180,18 @@ def kerckhoff(column):
     Return a list of possible key characters (ordered from most to least likely). 
     """
     n = len(column)
-    counts = { char : 0 for char in alphabets }
+    o_counts = { char : 0 for char in alphabets }
     for char in column:
         if char == None: continue
-        counts[char] += 1
+        o_counts[char] += 1
 
     shift_scores = { i : float('inf') for i in range(26) } 
     for shift in range(0, 26):
         e_counts = { char : 0 for char in alphabets }
-        for cipher_char in counts.keys():
+        for cipher_char in o_counts.keys():
             guessed_char = alphabets[(char_idx[cipher_char] - shift) % 26]
             e_counts[cipher_char] = (e_freqs[guessed_char] / 100) * n 
-        shift_scores[shift] = chi_squared(counts.values(), e_counts.values())
+        shift_scores[shift] = chi_squared(o_counts.values(), e_counts.values())
 
     ordered_guesses = [
         alphabets[shift]
@@ -217,36 +201,43 @@ def kerckhoff(column):
     return ordered_guesses
 
 
-def guess_key(cipher, klen):
+def guess_keys(cipher, klen):
     """
     Guess key by Kerckhoff method. 
     """
     matrix = build_matrix(cipher, klen)
     
-    ordered_guessed_per_column = []
+    all_ordered_guesses = []
     for i in range(klen):
-        ordered_guessed_per_column.append(kerckhoff(matrix[:,i]))
+        ordered_guesses_col_i = guess_shifts(matrix[:,i])
+        all_ordered_guesses.append(ordered_guesses_col_i)
 
-    return ordered_guessed_per_column
+    keys = [
+        "".join(col_guesses[rank] for col_guesses in all_ordered_guesses)
+        for rank in range(len(all_ordered_guesses[0]))
+    ]
+
+    return [
+        deduplicate_key(k)
+        for k in keys
+    ]
 
 
 def run(mode):
 
     parser = argparse.ArgumentParser()
-    if mode == ("encrypt" or "decrypt"):
-        parser.add_argument("key", type=str) 
+    if mode in ("encrypt", "decrypt"):
+        parser.add_argument("key", type=str)
     parser.add_argument("fname", type=str)
     args = parser.parse_args()
 
-    with open(args.fname) as fin:
-        content = fin.read()
-    input_text = normalize_text(content)
+    input_text = normalize_text(read_file(args.fname))
+    if len(input_text) <= 20_000:
+        print("Beware! Text length might be too short for accurate analysis.")
 
-    if mode == ("encrypt" or "decrypt"):
+    if mode in ("encrypt", "decrypt"):
         if Path(args.key).is_file():
-            with open(args.key) as fin:
-                content = fin.read()
-            key = normalize_text(content)
+            key = normalize_text(read_file(args.key))
         else: 
             key = normalize_text(args.key)
 
@@ -263,8 +254,9 @@ def run(mode):
     
     elif mode == "cryptanalyze":
         recovered_length = guess_key_length(input_text)
-        ordered_guessed_per_column = guess_key(input_text, recovered_length)
-        print_candidate_keys(ordered_guessed_per_column, 10)
+        keys = guess_keys(input_text, recovered_length)
+        for k in keys:
+            print(k)
     
     else: 
         print("Invalid mode. Try again.")

@@ -15,11 +15,35 @@ char_idx = {
 }
 
 e_ioc = 0.067
-e_freqs = (
-    pd.read_csv("./letter_freq.txt")
-    .set_index("letter")["frequency"]
-    .to_dict()
-)
+r_ioc = 0.038
+e_freqs = {
+    "A": 8.55,
+    "B": 1.60,
+    "C": 3.16,
+    "D": 3.87,
+    "E": 12.10,
+    "F": 2.18,
+    "G": 2.09,
+    "H": 4.96,
+    "I": 7.33,
+    "J": 0.22,
+    "K": 0.81,
+    "L": 4.21,
+    "M": 2.53,
+    "N": 7.17,
+    "O": 7.47,
+    "P": 2.07,
+    "Q": 0.10,
+    "R": 6.33,
+    "S": 6.73,
+    "T": 8.94,
+    "U": 2.68,
+    "V": 1.06,
+    "W": 1.83,
+    "X": 0.19,
+    "Y": 1.72,
+    "Z": 0.11,
+}
 
 
 def eprint(*args, **kwargs):
@@ -122,19 +146,17 @@ def guess_key_length(cipher, alpha=0.7):
 
     ranked_klen = top_klen_ioc_diff.keys()
     best_score, best_klen = float('-inf'), list(ranked_klen)[0]
-    max_diff = max(klen_ioc_diff.values())
+    max_diff = e_ioc - r_ioc
 
     for klen, ioc_diff in top_klen_ioc_diff.items():
-        # ioc score
-        ico_score = 1 - (ioc_diff / max_diff)
 
-        # length score (better when more candidates are its multiples)
+        ioc_score = max(0, 1 - (ioc_diff / max_diff))
+
         rest = ranked_klen - {klen}
-        dividing_count = sum( (1 - 1/r) for r in rest if r % klen == 0 )
+        dividing_count = sum( 1-(klen/r) for r in rest if r % klen == 0 )
         divisor_score = dividing_count / len(rest)
 
-        # combined score
-        final_score = alpha * ico_score + (1 - alpha) * divisor_score
+        final_score = alpha * ioc_score + (1 - alpha) * divisor_score
 
         if final_score > best_score:
             best_score, best_klen = final_score, klen
@@ -255,7 +277,9 @@ def run(mode):
 
     elif mode == "keylength":
         recovered_length = guess_key_length(input_text)
-        print(recovered_length)
+        recovered_keys = guess_keys(input_text, recovered_length)
+        best_key = recovered_keys[0]
+        print(len(best_key))
     
     elif mode == "cryptanalyze":
         if args.keylen < 1 or args.keylen > 32:

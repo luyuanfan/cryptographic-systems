@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYBIN="$DIR/.venv/bin/python3"
+if [ ! -x "$PYBIN" ]; then
+    echo "ERROR: venv not found at $DIR/.venv — run build.sh first" >&2
+    exit 1
+fi
+exec "$PYBIN" "$DIR/src/vigenere.py" cryptanalyze "$@"

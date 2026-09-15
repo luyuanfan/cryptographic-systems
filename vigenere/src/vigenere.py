@@ -1,13 +1,12 @@
+import sys
 import argparse
 from pathlib import Path
-from collections import defaultdict, Counter
+from collections import defaultdict
 from unidecode import unidecode
 
 import numpy as np
 import pandas as pd
 
-OUTDIR = "output"
-Path(OUTDIR).mkdir(parents=True, exist_ok=True)
 
 alphabets = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 char_idx = {
@@ -23,9 +22,8 @@ e_freqs = (
 )
 
 
-def write_file(fname, text):
-    with open(f"{OUTDIR}/{fname}.txt", "w") as fout: 
-        fout.write(text)
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
 
 
 def read_file(fname):
@@ -102,15 +100,19 @@ def ioc(column):
 def guess_key_length(cipher, alpha=0.7):
     """
     For each possible key length (1-32), build a cipher matrix;
-    Since every letter in the same column are shifted by the same letter in key,
-    its letter IOC should be close to the a real English IOC (0.067).
+    Calculate the per-column IOCs for each matrix;
+    Compute an average IOC score over the columns and rank them (the closer to the 
+    real English IOC, the better);
+    With the ranked key-length-to-IOCs-mapping (top 5), we pick the one that best
+    balances IOC differences and key length. 
     """
+
     klen_ioc_diff = defaultdict(float)
     for klen in range(1, min(32, len(cipher)//2)+1):
-        curr_score = 0.0
+        ioc_sum = 0.0
         matrix = build_matrix(cipher, klen)
-        curr_score = sum( ioc(matrix[:,i]) for i in range(klen) )
-        avg_ioc = curr_score / klen
+        ioc_sum = sum( ioc(matrix[:,i]) for i in range(klen) )
+        avg_ioc = ioc_sum / klen
         klen_ioc_diff[klen] = abs(avg_ioc - e_ioc)
 
     top_klen_ioc_diff = {
@@ -128,7 +130,7 @@ def guess_key_length(cipher, alpha=0.7):
 
         # length score (better when more candidates are its multiples)
         rest = ranked_klen - {klen}
-        dividing_count = sum((1 - 1/r) for r in rest if r % klen == 0)
+        dividing_count = sum( (1 - 1/r) for r in rest if r % klen == 0 )
         divisor_score = dividing_count / len(rest)
 
         # combined score
@@ -228,12 +230,15 @@ def run(mode):
     parser = argparse.ArgumentParser()
     if mode in ("encrypt", "decrypt"):
         parser.add_argument("key", type=str)
-    parser.add_argument("fname", type=str)
+        parser.add_argument("fname", type=str)
+    elif mode == "keylength": 
+        parser.add_argument("fname", type=str)
+    else:
+        parser.add_argument("fname", type=str)
+        parser.add_argument("keylen", type=int)
     args = parser.parse_args()
 
     input_text = normalize_text(read_file(args.fname))
-    if len(input_text) <= 20_000:
-        print("Beware! Text length might be too short for accurate analysis.")
 
     if mode in ("encrypt", "decrypt"):
         if Path(args.key).is_file():
@@ -243,7 +248,7 @@ def run(mode):
 
         if len(key) == 0 or len(key) > 32:
             print("Key length invalid (1-32 characters)")
-            exit()
+            sys.exit()
 
         output_text = encrypt_decrypt(mode, input_text, key)
         print(output_text)
@@ -253,10 +258,21 @@ def run(mode):
         print(recovered_length)
     
     elif mode == "cryptanalyze":
-        recovered_length = guess_key_length(input_text)
-        keys = guess_keys(input_text, recovered_length)
-        for k in keys:
+        if args.keylen < 1 or args.keylen > 32:
+            eprint("Key length invalid (1-32 characters)")
+            sys.exit(1)
+        keys = guess_keys(input_text, args.keylen)
+        for k in keys[:10]:
             print(k)
-    
+
     else: 
-        print("Invalid mode. Try again.")
+        eprint(f"Invalid mode: {mode}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        eprint("Usage: vigenere.py <encrypt|decrypt|keylength|cryptanalyze|break> [args...]")
+        sys.exit(1)
+    mode = sys.argv[1]
+    sys.argv = [sys.argv[0]] + sys.argv[2:]
+    run(mode)
